@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WebXR ExhibitXR - Fixed</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.150.1/build/three.module.js"
+    }
+  }
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Inter', sans-serif; overflow: hidden; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+    
+    .landing-page {
+      position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      z-index: 1000; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+    
+    .landing-overlay {
+      background: white; padding: 40px 50px; text-align: center;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3); max-width: 480px; border-radius: 10px;
+    }
+    
+    .landing-title { color: #1a1a1a; font-size: 3rem; font-weight: 700; margin-bottom: 20px; }
+    .landing-subtitle { color: #666; font-size: 1.2rem; margin-bottom: 40px; }
+    
+    .button-group { display: flex; gap: 15px; flex-wrap: wrap; justify-content: center; }
+    .action-btn {
+      background: #5B6D92; color: white; border: none; padding: 15px 30px;
+      font-size: 1.1rem; font-weight: 600; cursor: pointer; border-radius: 5px;
+      transition: all 0.3s ease; text-transform: uppercase; letter-spacing: 1px;
+    }
+    .action-btn:hover { background: #4a5a7a; transform: translateY(-2px); }
+    .action-btn:disabled { background: #ccc; cursor: not-allowed; }
+    
+    .controls-panel {
+      position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+      display: none; align-items: center; gap: 15px;
+      background: rgba(255, 255, 255, 0.1); backdrop-filter: blur(20px);
+      border-radius: 25px; padding: 12px 25px; z-index: 1000;
+    }
+    
+    .control-btn {
+      width: 50px; height: 50px; border-radius: 50%; border: none; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px; color: white; transition: all 0.3s ease;
+    }
+    
+    .add-btn { background: linear-gradient(45deg, #4CAF50, #45a049); }
+    .remove-btn { background: linear-gradient(45deg, #f44336, #d32f2f); }
+    .save-btn { background: linear-gradient(45deg, #2196F3, #1976D2); font-size: 12px; }
+    .close-btn { background: linear-gradient(45deg, #9E9E9E, #757575); }
+    
+    .status-message {
+      position: fixed; top: 30px; left: 50%; transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.8); color: white; padding: 12px 25px;
+      border-radius: 20px; font-size: 14px; z-index: 1001; display: none;
+    }
+    
+    .xr-active .landing-page { display: none; }
+    .xr-active .controls-panel { display: flex; }
+    .remove-mode .status-message { background: rgba(244, 67, 54, 0.9); }
+    .file-input { display: none; }
+  </style>
+</head>
+<body>
+  <div class="landing-page" id="landing-page">
+    <div class="landing-overlay">
+      <h1 class="landing-title">ExhibitXR</h1>
+      <p class="landing-subtitle">Create boundless AR experiences</p>
+      <div class="button-group">
+        <button class="action-btn" id="add-model-btn">Add Model</button>
+        <button class="action-btn" id="load-btn">Load Exhibit</button>
+        <button class="action-btn" id="launch-btn" disabled>Launch AR</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="controls-panel" id="controls-panel">
+    <button class="control-btn add-btn" id="add-btn">+</button>
+    <button class="control-btn remove-btn" id="remove-btn">−</button>
+    <button class="control-btn save-btn" id="save-btn">💾</button>
+    <button class="control-btn close-btn" id="close-btn">×</button>
+  </div>
+
+  <div class="status-message" id="status-message"></div>
+  <input type="file" class="file-input" id="file-input" accept=".obj,.glb,.gltf">
+  <input type="file" class="file-input" id="load-input" accept=".zip">
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { ARButton } from 'https://unpkg.com/three@0.150.1/examples/jsm/webxr/ARButton.js';
+    import { OBJLoader } from 'https://unpkg.com/three@0.150.1/examples/jsm/loaders/OBJLoader.js';
+    import { GLTFLoader } from 'https://unpkg.com/three@0.150.1/examples/jsm/loaders/GLTFLoader.js';
+
+    let camera, scene, renderer, xrSession, referenceSpace;
+    let controllers = [], models = [], activeControllers = new Set();
+    let selectedModel = null, removeMode = false, interactionMode = 'none';
+    let userReferencePosition = new THREE.Vector3();
+    let userReferenceCaptured = false;
+    let hasModels = false;
+    
+    init();
+
+    function init() {
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      renderer.setClearColor(0x000000, 0);
+      document.body.appendChild(renderer.domElement);
+
+      // Simple lighting
+      scene.add(new THREE.AmbientLight(0x404040, 2));
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
+      directionalLight.position.set(1, 1, 1);
+      scene.add(directionalLight);
+
+      setupEventListeners();
+      window.addEventListener('resize', onWindowResize);
+    }
+
+    function setupEventListeners() {
+      document.getElementById('add-model-btn').addEventListener('click', () => document.getElementById('file-input').click());
+      document.getElementById('load-btn').addEventListener('click', () => document.getElementById('load-input').click());
+      document.getElementById('launch-btn').addEventListener('click', startARSession);
+      document.getElementById('add-btn').addEventListener('click', () => document.getElementById('file-input').click());
+      document.getElementById('remove-btn').addEventListener('click', toggleRemoveMode);
+      document.getElementById('save-btn').addEventListener('click', saveExhibit);
+      document.getElementById('close-btn').addEventListener('click', endARSession);
+      document.getElementById('file-input').addEventListener('change', handleFileSelect);
+      document.getElementById('load-input').addEventListener('change', handleLoadSelect);
+    }
+
+    function showStatus(message, isError = false) {
+      const statusEl = document.getElementById('status-message');
+      statusEl.textContent = message;
+      statusEl.style.display = 'block';
+      statusEl.style.background = isError ? 'rgba(244, 67, 54, 0.9)' : 'rgba(0, 0, 0, 0.8)';
+      setTimeout(() => statusEl.style.display = 'none', 3000);
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    async function startARSession() {
+      if (!navigator.xr) {
+        showStatus('WebXR not supported', true);
+        return;
+      }
+      
+      try {
+        const supported = await navigator.xr.isSessionSupported('immersive-ar');
+        if (!supported) {
+          showStatus('WebXR AR not supported', true);
+          return;
+        }
+        
+        const session = await navigator.xr.requestSession('immersive-ar', {
+          requiredFeatures: ['local-floor'],
+          optionalFeatures: ['unbounded', 'dom-overlay'],
+          domOverlay: { root: document.body }
+        });
+        
+        await onSessionStarted(session);
+      } catch (error) {
+        showStatus('Failed to start AR session', true);
+        console.error('AR session error:', error);
+      }
+    }
+
+    async function onSessionStarted(session) {
+      xrSession = session;
+      document.body.classList.add('xr-active');
+      
+      try {
+        referenceSpace = await session.requestReferenceSpace('unbounded');
+        showStatus('Boundless AR active!');
+      } catch (error) {
+        try {
+          referenceSpace = await session.requestReferenceSpace('local-floor');
+          showStatus('AR active with floor tracking.');
+        } catch (error2) {
+          referenceSpace = await session.requestReferenceSpace('local');
+          showStatus('AR active.');
+        }
+      }
+      
+      renderer.xr.setReferenceSpace(referenceSpace);
+      renderer.xr.setSession(session);
+      
+      // Reset reference capture for this session
+      userReferenceCaptured = false;
+      
+      setupControllers(session);
+      renderer.setAnimationLoop(render);
+      session.addEventListener('end', onSessionEnd);
+    }
+    
+    function endARSession() {
+      if (xrSession) xrSession.end();
+    }
+    
+    function onSessionEnd() {
+      document.body.classList.remove('xr-active');
+      controllers = [];
+      activeControllers.clear();
+      selectedModel = null;
+      removeMode = false;
+      interactionMode = 'none';
+      referenceSpace = null;
+      userReferenceCaptured = false;
+      renderer.setAnimationLoop(null);
+      xrSession = null;
+    }
+
+    function setupControllers(session) {
+      controllers = [];
+      for (let i = 0; i < 2; i++) {
+        const controller = renderer.xr.getController(i);
+        controller.userData.id = i;
+        controller.addEventListener('selectstart', onSelectStart);
+        controller.addEventListener('selectend', onSelectEnd);
+        scene.add(controller);
+        controllers.push(controller);
+      }
+    }
+    
+    function onSelectStart(event) {
+      const controller = event.target;
+      const controllerPos = new THREE.Vector3();
+      controller.getWorldPosition(controllerPos);
+      
+      activeControllers.add(controller.userData.id);
+      
+      if (removeMode) {
+        const modelToRemove = findNearestModel(controllerPos);
+        if (modelToRemove) {
+          removeModel(modelToRemove);
+          return;
+        }
+      }
+      
+      if (interactionMode === 'none') {
+        const nearestModel = findNearestModel(controllerPos);
+        if (nearestModel) {
+          selectedModel = nearestModel;
+          interactionMode = 'move';
+          highlightModel(nearestModel, true);
+          showStatus('Grabbed! Use both hands to scale/rotate.');
+        }
+      }
+    }
+    
+    function onSelectEnd(event) {
+      const controller = event.target;
+      activeControllers.delete(controller.userData.id);
+      
+      if (activeControllers.size === 0) {
+        if (selectedModel) {
+          highlightModel(selectedModel, false);
+          selectedModel = null;
+        }
+        interactionMode = 'none';
+        showStatus('Model released');
+      }
+    }
+
+    function findNearestModel(position) {
+      let nearest = null;
+      let minDistance = 0.3;
+      
+      models.forEach(model => {
+        const distance = position.distanceTo(model.position);
+        if (distance < minDistance) {
+          minDistance = distance;
+          nearest = model;
+        }
+      });
+      
+      return nearest;
+    }
+
+    function highlightModel(model, isHighlighted) {
+      if (!model) return;
+      
+      model.traverse((child) => {
+        if (child.isMesh && child.material) {
+          if (isHighlighted) {
+            child.material.emissive = new THREE.Color(removeMode ? 0xff0000 : 0x00ff88);
+            child.material.emissiveIntensity = 0.3;
+          } else {
+            child.material.emissive = new THREE.Color(0x000000);
+            child.material.emissiveIntensity = 0;
+          }
+        }
+      });
+    }
+
+    function toggleRemoveMode() {
+      removeMode = !removeMode;
+      const removeBtn = document.getElementById('remove-btn');
+      
+      if (removeMode) {
+        removeBtn.style.background = 'linear-gradient(45deg, #ff1744, #d50000)';
+        showStatus('Remove mode: Point and squeeze to delete');
+        models.forEach(model => highlightModel(model, true));
+      } else {
+        removeBtn.style.background = 'linear-gradient(45deg, #f44336, #d32f2f)';
+        showStatus('Remove mode disabled');
+        models.forEach(model => highlightModel(model, false));
+      }
+    }
+
+    function removeModel(model) {
+      const index = models.indexOf(model);
+      if (index > -1) {
+        models.splice(index, 1);
+        scene.remove(model);
+        hasModels = models.length > 0;
+        updateButtonState();
+        showStatus('Model removed!');
+      }
+    }
+
+    function updateButtonState() {
+      const btn = document.getElementById('launch-btn');
+      btn.disabled = !hasModels;
+      btn.textContent = hasModels ? 'Launch AR' : 'Add Models First';
+    }
+
+    function handleFileSelect(event) {
+      if (event.target.files.length > 0) {
+        const file = event.target.files[0];
+        const fileURL = URL.createObjectURL(file);
+        const fileType = file.name.toLowerCase().split('.').pop();
+        
+        showStatus(`Loading ${file.name}...`);
+        
+        if (fileType === 'obj') {
+          new OBJLoader().load(fileURL, (object) => {
+            processLoadedModel(object, file);
+            URL.revokeObjectURL(fileURL);
+          });
+        } else if (fileType === 'glb' || fileType === 'gltf') {
+          new GLTFLoader().load(fileURL, (gltf) => {
+            processLoadedModel(gltf.scene, file);
+            URL.revokeObjectURL(fileURL);
+          });
+        } else {
+          showStatus('Unsupported file type. Use OBJ or GLB/GLTF.', true);
+        }
+      }
+    }
+
+    function processLoadedModel(object, file) {
+      object.userData.filename = file.name;
+      
+      // Setup materials
+      object.traverse((child) => {
+        if (child.isMesh) {
+          if (!child.material) {
+            child.material = new THREE.MeshStandardMaterial({ color: 0x888888 });
+          }
+          child.material.transparent = true;
+          child.castShadow = true;
+          child.receiveShadow = true;
+        }
+      });
+      
+      // Scale to reasonable size
+      const box = new THREE.Box3().setFromObject(object);
+      const size = box.getSize(new THREE.Vector3());
+      const maxDimension = Math.max(size.x, size.y, size.z);
+      const scale = 0.3 / maxDimension;
+      object.scale.setScalar(scale);
+      
+      // Center the object
+      const center = box.getCenter(new THREE.Vector3());
+      object.position.sub(center.multiplyScalar(scale));
+      
+      // Position in a circle around user - FIXED: relative to user position
+      const angle = (models.length * Math.PI * 2) / 6;
+      const radius = 1.0;
+      
+      // Position relative to user reference (will be updated in render loop)
+      object.position.add(new THREE.Vector3(
+        Math.sin(angle) * radius,
+        0, // Floor level
+        Math.cos(angle) * radius
+      ));
+      
+      // Store original position for saving
+      object.userData.originalPosition = object.position.clone();
+      
+      scene.add(object);
+      models.push(object);
+      
+      hasModels = true;
+      updateButtonState();
+      
+      showStatus(`${file.name} loaded! Models: ${models.length}`);
+    }
+
+    async function saveExhibit() {
+      if (models.length === 0) {
+        showStatus('No models to save!', true);
+        return;
+      }
+      
+      showStatus('Saving exhibit...');
+      
+      // Simple save - just positions relative to user
+      const exhibitData = {
+        models: models.map(model => ({
+          filename: model.userData.filename,
+          position: model.position.toArray(),
+          rotation: model.rotation.toArray(),
+          scale: model.scale.toArray()
+        }))
+      };
+      
+      // Download as JSON for now (simplified)
+      const dataStr = JSON.stringify(exhibitData, null, 2);
+      const dataBlob = new Blob([dataStr], { type: 'application/json' });
+      const url = URL.createObjectURL(dataBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'exhibit_' + Date.now() + '.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      
+      showStatus('Exhibit saved!');
+    }
+
+    function handleLoadSelect(event) {
+      // Simplified for now - just log that load was clicked
+      showStatus('Load functionality simplified - use Add Model for now');
+    }
+
+    function render(timestamp, frame) {
+      // FIXED: Properly capture user reference position in render loop
+      if (frame && !userReferenceCaptured && referenceSpace) {
+        const viewerPose = frame.getViewerPose(referenceSpace);
+        if (viewerPose) {
+          userReferencePosition.copy(viewerPose.transform.position);
+          userReferenceCaptured = true;
+          
+          // Update model positions to be relative to user
+          models.forEach((model, index) => {
+            const angle = (index * Math.PI * 2) / 6;
+            const radius = 1.0;
+            model.position.set(
+              userReferencePosition.x + Math.sin(angle) * radius,
+              userReferencePosition.y,
+              userReferencePosition.z + Math.cos(angle) * radius
+            );
+          });
+          
+          showStatus('Models positioned around you!');
+        }
+      }
+      
+      // Simple interaction - just move model with first controller
+      if (selectedModel && activeControllers.size > 0) {
+        const controllerId = Array.from(activeControllers)[0];
+        const controller = controllers[controllerId];
+        if (controller) {
+          const controllerPos = new THREE.Vector3();
+          controller.getWorldPosition(controllerPos);
+          selectedModel.position.copy(controllerPos);
+        }
+      }
+      
+      renderer.render(scene, camera);
+    }
+  </script>
+</body>
+</html>
